@@ -2,8 +2,8 @@ import { useState, useEffect, useMemo, useCallback } from "react";
 import { PieChart, Pie, Cell, ResponsiveContainer, Tooltip, BarChart, Bar, XAxis, YAxis } from "recharts";
 
 // ── Supabase ──────────────────────────────────────────────────────────────────
-const SUPABASE_URL = "https://pdswaeahzdofrlbdjdfq.supabase.co";
-const SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InBkc3dhZWFoemRvZnJsYmRqZGZxIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzMyNDE2NDAsImV4cCI6MjA4ODgxNzY0MH0.NuEqOduiPdwri20iWubMdJ8dRiClMwwOjhiXpw_w6NY";
+const SUPABASE_URL = import.meta.env.VITE_SUPABASE_URL;
+const SUPABASE_KEY = import.meta.env.VITE_SUPABASE_KEY;
 
 const sbFetch = (path, opts = {}) => fetch(`${SUPABASE_URL}/rest/v1/${path}`, {
   ...opts,

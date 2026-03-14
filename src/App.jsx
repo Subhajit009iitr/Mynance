@@ -412,7 +412,7 @@ function AddExpense({ onAdd, onCancel, saving, accounts, subcatMap }) {
   return <div style={{padding:"22px 16px"}} className="fade">
     <style>{`
       .ah{display:flex;align-items:center;gap:12px;margin-bottom:26px;}
-      .abk{background:var(--surface2);border:1px solid var(--border);border-radius:10px;width:36px;height:36px;color:var(--text);font-size:15px;display:flex;align-items:center;justify-content:center;}
+      .abk{background:var(--surface2);border:1px solid var(--border);border-radius:10px;width:36px;height:36px;color:var(--text);font-size:15px;display:flex;align-items:center;justify-content:center;line-height:1;padding-bottom:1px;}
       .atit{font-size:20px;font-weight:800;}
       .flbl{font-size:11px;font-weight:600;color:var(--muted);letter-spacing:.1em;text-transform:uppercase;font-family:'JetBrains Mono',monospace;margin-bottom:8px;}
       .fg{margin-bottom:20px;}
@@ -510,7 +510,7 @@ function MonthView({ expenses, selMonth, setSelMonth, onDelete, onBack }) {
   return <div style={{padding:"22px 16px 0"}} className="fade">
     <style>{`
       .mvh{display:flex;align-items:center;gap:10px;margin-bottom:18px;}
-      .mvbk{background:var(--surface2);border:1px solid var(--border);border-radius:10px;width:36px;height:36px;color:var(--text);font-size:15px;display:flex;align-items:center;justify-content:center;}
+      .mvbk{background:var(--surface2);border:1px solid var(--border);border-radius:10px;width:36px;height:36px;color:var(--text);font-size:15px;display:flex;align-items:center;justify-content:center;line-height:1;padding-bottom:1px;}
       .mvt{font-size:20px;font-weight:800;}
       .mvnav{margin-left:auto;display:flex;align-items:center;gap:8px;}
       .mvnav button{background:var(--surface2);border:1px solid var(--border);border-radius:8px;width:28px;height:28px;color:var(--text);font-size:13px;display:flex;align-items:center;justify-content:center;}

@@ -71,6 +71,14 @@ const db = {
   async fetchAccounts(token)  { const r=await sbFetch("accounts?select=*&order=name.asc",{token}); if(!r.ok)throw new Error(await r.text()); return r.json(); },
   async fetchSubcats(token)   { const r=await sbFetch("subcategories?select=*&order=name.asc",{token}); if(!r.ok)throw new Error(await r.text()); return r.json(); },
   async fetchProfile(token)   { const r=await sbFetch("profiles?select=*&limit=1",{token}); if(!r.ok)throw new Error(await r.text()); const rows=await r.json(); return rows[0]||null; },
+  async upsertProfile(uid, full_name, avatar_url, token) {
+    const r=await sbFetch("profiles",{method:"POST",prefer:"resolution=merge-duplicates,return=representation",token,body:JSON.stringify({id:uid,full_name,avatar_url})});
+    if(!r.ok)throw new Error(await r.text()); const rows=await r.json(); return rows[0];
+  },
+  async updateProfileName(uid, full_name, token) {
+    const r=await sbFetch(`profiles?id=eq.${uid}`,{method:"PATCH",token,body:JSON.stringify({full_name})});
+    if(!r.ok)throw new Error(await r.text()); const rows=await r.json(); return rows[0];
+  },
 
   async insertExpense(e, token, uid) {
     const r=await sbFetch("expenses",{method:"POST",token,body:JSON.stringify({category:e.category,subcategory:e.subcategory,amount:e.amount,date:e.date,bank:e.bank,note:e.note||"",user_id:uid})});
@@ -194,10 +202,35 @@ function LoginScreen({ onLogin }) {
 // ════════════════════════════════════════════════════════════════════════════════
 // PROFILE TAB
 // ════════════════════════════════════════════════════════════════════════════════
-function Profile({ user, profile, token, onSignOut }) {
+function Profile({ user, profile, token, onSignOut, onProfileUpdate }) {
   const [signingOut, setSigningOut] = useState(false);
+  // Default name = email prefix (before @)
+  const defaultName = user?.email ? user.email.split("@")[0] : "User";
+  const currentName = profile?.full_name || defaultName;
+  const [editingName, setEditingName] = useState(false);
+  const [nameVal, setNameVal]         = useState(currentName);
+  const [savingName, setSavingName]   = useState(false);
+  const [nameErr, setNameErr]         = useState("");
+
+  const initials = currentName.split(" ").map(w=>w[0]).join("").toUpperCase().slice(0,2);
+
   const handleSignOut = async () => { setSigningOut(true); await onSignOut(); };
-  const initials = (profile?.full_name || user?.email || "U").split(" ").map(w=>w[0]).join("").toUpperCase().slice(0,2);
+
+  const startEdit = () => { setNameVal(currentName); setNameErr(""); setEditingName(true); };
+  const cancelEdit = () => { setEditingName(false); setNameErr(""); };
+
+  const saveName = async () => {
+    const v = nameVal.trim();
+    if (!v) { setNameErr("Name can't be empty"); return; }
+    if (v === currentName) { setEditingName(false); return; }
+    try {
+      setSavingName(true);
+      const updated = await db.updateProfileName(user.id, v, token);
+      onProfileUpdate(updated);
+      setEditingName(false);
+    } catch { setNameErr("Failed to save, try again"); }
+    finally { setSavingName(false); }
+  };
 
   return <div style={{padding:"22px 16px 0"}} className="fade">
     <style>{`
@@ -211,9 +244,17 @@ function Profile({ user, profile, token, onSignOut }) {
       .prof-row{display:flex;align-items:center;gap:12px;padding:10px 0;border-bottom:1px solid var(--border);}
       .prof-row:last-child{border-bottom:none;padding-bottom:0;}
       .prof-row-ico{width:32px;height:32px;border-radius:10px;background:var(--surface2);display:flex;align-items:center;justify-content:center;font-size:15px;flex-shrink:0;}
-      .prof-row-info{flex:1;}
+      .prof-row-info{flex:1;min-width:0;}
       .prof-row-label{font-size:11px;color:var(--muted);font-family:'JetBrains Mono',monospace;text-transform:uppercase;letter-spacing:.06em;}
       .prof-row-val{font-size:14px;font-weight:600;margin-top:1px;}
+      .edit-btn{background:none;border:none;color:var(--accent);font-size:12px;font-family:'Outfit',sans-serif;font-weight:600;padding:2px 8px;border-radius:6px;transition:all .15s;}
+      .edit-btn:hover{background:rgba(129,140,248,.1);}
+      .name-edit-row{display:flex;gap:8px;align-items:center;margin-top:6px;}
+      .name-input{flex:1;background:var(--surface2);border:2px solid var(--accent);border-radius:10px;padding:8px 12px;color:var(--text);font-family:'Outfit',sans-serif;font-size:14px;font-weight:600;outline:none;}
+      .name-save{background:var(--accent);border:none;border-radius:10px;padding:8px 14px;color:white;font-family:'Outfit',sans-serif;font-size:13px;font-weight:700;transition:all .15s;white-space:nowrap;}
+      .name-save:hover:not(:disabled){opacity:.85;} .name-save:disabled{opacity:.6;}
+      .name-cancel{background:var(--surface2);border:1px solid var(--border);border-radius:10px;padding:8px 12px;color:var(--muted);font-family:'Outfit',sans-serif;font-size:13px;font-weight:600;}
+      .name-err{color:#f87171;font-size:12px;margin-top:4px;}
       .signout-btn{width:100%;padding:15px;background:rgba(248,113,113,0.1);border:1px solid rgba(248,113,113,0.25);border-radius:16px;color:#f87171;font-family:'Outfit',sans-serif;font-size:15px;font-weight:700;transition:all .2s;margin-top:8px;display:flex;align-items:center;justify-content:center;gap:8px;}
       .signout-btn:hover{background:rgba(248,113,113,0.18);}
       .signout-btn:disabled{opacity:.6;}
@@ -226,7 +267,7 @@ function Profile({ user, profile, token, onSignOut }) {
           ? <img src={profile.avatar_url} alt="avatar" referrerPolicy="no-referrer"/>
           : initials}
       </div>
-      <div className="prof-name">{profile?.full_name || "User"}</div>
+      <div className="prof-name">{currentName}</div>
       <div className="prof-email">{user?.email}</div>
       <div className="prof-since">Member since {user?.created_at ? new Date(user.created_at).toLocaleDateString("en-IN",{month:"long",year:"numeric"}) : "—"}</div>
     </div>
@@ -237,7 +278,25 @@ function Profile({ user, profile, token, onSignOut }) {
         <div className="prof-row-ico">👤</div>
         <div className="prof-row-info">
           <div className="prof-row-label">Name</div>
-          <div className="prof-row-val">{profile?.full_name || "—"}</div>
+          {editingName ? (
+            <>
+              <div className="name-edit-row">
+                <input className="name-input" value={nameVal} onChange={e=>setNameVal(e.target.value)}
+                  onKeyDown={e=>{if(e.key==="Enter")saveName();if(e.key==="Escape")cancelEdit();}}
+                  autoFocus maxLength={40}/>
+                <button className="name-save" onClick={saveName} disabled={savingName}>
+                  {savingName?<span className="spin">⟳</span>:"Save"}
+                </button>
+                <button className="name-cancel" onClick={cancelEdit}>✕</button>
+              </div>
+              {nameErr && <div className="name-err">⚠ {nameErr}</div>}
+            </>
+          ) : (
+            <div style={{display:"flex",alignItems:"center",gap:8,marginTop:1}}>
+              <div className="prof-row-val">{currentName}</div>
+              <button className="edit-btn" onClick={startEdit}>Edit</button>
+            </div>
+          )}
         </div>
       </div>
       <div className="prof-row">
@@ -734,7 +793,7 @@ export default function App() {
         db.fetchAll(token), db.fetchAccounts(token),
         db.fetchSubcats(token), db.fetchProfile(token)
       ]);
-      // New user — seed defaults
+      // New user — seed defaults + create profile
       if (accs.length === 0 && subs.length === 0) {
         await db.seedDefaults(token, uid);
         const [newAccs, newSubs] = await Promise.all([db.fetchAccounts(token), db.fetchSubcats(token)]);
@@ -742,7 +801,19 @@ export default function App() {
       } else {
         setAccounts(accs); setSubcats(subs);
       }
-      setExpenses(exps); setProfile(prof);
+      // Upsert profile — creates it if missing (replaces trigger), keeps existing name if set
+      if (!prof) {
+        try {
+          const u = await auth.getUser(token);
+          const emailName = u?.email ? u.email.split("@")[0] : "User";
+          const avatarUrl = u?.user_metadata?.avatar_url || u?.raw_user_meta_data?.avatar_url || null;
+          const newProf = await db.upsertProfile(uid, emailName, avatarUrl, token);
+          setProfile(newProf);
+        } catch { setProfile(null); }
+      } else {
+        setProfile(prof);
+      }
+      setExpenses(exps);
     } catch(e) {
       setDbError("Could not load your data. Try refreshing.");
       showToast("Data load error", true);
@@ -829,7 +900,7 @@ export default function App() {
             <div className="es"><div className="es-i">⚠️</div><div className="es-t">Error</div><div>{dbError}</div></div>
           ) : (
             <>
-              {tab==="profile"    && <Profile user={user} profile={profile} token={session.access_token} onSignOut={handleSignOut}/>}
+              {tab==="profile"    && <Profile user={user} profile={profile} token={session.access_token} onSignOut={handleSignOut} onProfileUpdate={p=>setProfile(p)}/>}
               {tab==="dashboard"  && <Dashboard expenses={expenses} selMonth={selMonth} setSelMonth={setSelMonth} onGoEntries={()=>setTab("entries")} onExport={handleExport} exporting={exporting}/>}
               {tab==="add"        && <AddExpense onAdd={addExpense} onCancel={()=>setTab("dashboard")} saving={saving} accounts={accounts} subcatMap={subcatMap}/>}
               {tab==="entries"    && <MonthView expenses={expenses} selMonth={selMonth} setSelMonth={setSelMonth} onDelete={deleteExpense} onBack={()=>setTab("dashboard")}/>}

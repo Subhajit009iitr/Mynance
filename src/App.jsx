@@ -194,6 +194,7 @@ function LoginScreen({ onLogin }) {
           {loading ? "Redirecting…" : "Continue with Google"}
         </button>
         <div className="login-footer">Your data is private and securely stored.<br/>Only you can see your expenses.</div>
+        <div className="login-footer" style={{marginTop:16,opacity:0.5}}>Made with ❤️ by Subhajit</div>
       </div>
     </div>
   );
@@ -439,6 +440,7 @@ function Dashboard({ expenses, selMonth, setSelMonth, onGoEntries, onExport, exp
       </div>
     </>}
     <button className="vb" onClick={onGoEntries}>View All Entries for {MONTHS[month]} →</button>
+    <div style={{textAlign:"center",fontSize:11,color:"rgba(238,240,248,0.2)",paddingBottom:8,fontFamily:"JetBrains Mono,monospace"}}>Made with ❤️ by Subhajit</div>
   </div>;
 }
 

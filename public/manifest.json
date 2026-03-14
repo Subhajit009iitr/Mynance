@@ -1,6 +1,6 @@
 {
-  "name": "Finance Tracker",
-  "short_name": "FinTrack",
+  "name": "Mynance",
+  "short_name": "Mynance",
   "description": "Personal finance tracker — Needs, Wants & Investments",
   "start_url": "/",
   "display": "standalone",

@@ -387,7 +387,7 @@ function Dashboard({ expenses, selMonth, setSelMonth, onGoEntries, onExport, exp
       .empt{font-size:15px;font-weight:700;color:var(--text);margin-bottom:4px;}
     `}</style>
     <div className="dh">
-      <div className="dh-l"><div className="t">Finance Tracker</div><div className="sb-badge"><span className="sb-dot"/>Supabase · Live</div></div>
+      <div className="dh-l"><div className="t">Mynance</div><div className="sb-badge">Personal Finance Tracker</div></div>
       <div className="dh-r">
         <div className="mnav"><button className="mb" onClick={prevM}>‹</button><div className="ml">{MONTHS[month]} {year}</div><button className="mb" onClick={nextM}>›</button></div>
         <button className="exbtn" onClick={onExport} disabled={exporting}>{exporting?<span className="spin">⟳</span>:"⬇"} Export Excel</button>

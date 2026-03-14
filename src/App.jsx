@@ -9,38 +9,107 @@ const sbFetch = (path, opts = {}) => fetch(`${SUPABASE_URL}/rest/v1/${path}`, {
   ...opts,
   headers: {
     "apikey": SUPABASE_KEY,
-    "Authorization": `Bearer ${SUPABASE_KEY}`,
+    "Authorization": `Bearer ${opts.token || SUPABASE_KEY}`,
     "Content-Type": "application/json",
     "Prefer": opts.prefer || "return=representation",
   },
 });
 
-const db = {
-  async fetchAll()        { const r=await sbFetch("expenses?select=*&order=created_at.desc"); if(!r.ok)throw new Error(await r.text()); return r.json(); },
-  async fetchAccounts()   { const r=await sbFetch("accounts?select=*&order=name.asc"); if(!r.ok)throw new Error(await r.text()); return r.json(); },
-  async fetchSubcats()    { const r=await sbFetch("subcategories?select=*&order=name.asc"); if(!r.ok)throw new Error(await r.text()); return r.json(); },
-  async insertExpense(e)  { const r=await sbFetch("expenses",{method:"POST",body:JSON.stringify({category:e.category,subcategory:e.subcategory,amount:e.amount,date:e.date,bank:e.bank,note:e.note||""})}); if(!r.ok)throw new Error(await r.text()); return (await r.json())[0]; },
-  async deleteExpense(id) { const r=await sbFetch(`expenses?id=eq.${id}`,{method:"DELETE",prefer:"return=minimal"}); if(!r.ok)throw new Error(await r.text()); },
-  async insertAccount(name)     { const r=await sbFetch("accounts",{method:"POST",body:JSON.stringify({name})}); if(!r.ok)throw new Error(await r.text()); return (await r.json())[0]; },
-  async deleteAccount(id)       { const r=await sbFetch(`accounts?id=eq.${id}`,{method:"DELETE",prefer:"return=minimal"}); if(!r.ok)throw new Error(await r.text()); },
-  async insertSubcat(category,name) { const r=await sbFetch("subcategories",{method:"POST",body:JSON.stringify({category,name})}); if(!r.ok)throw new Error(await r.text()); return (await r.json())[0]; },
-  async deleteSubcat(id)        { const r=await sbFetch(`subcategories?id=eq.${id}`,{method:"DELETE",prefer:"return=minimal"}); if(!r.ok)throw new Error(await r.text()); },
-  async migrateFromLocal() {
+// Auth helpers using Supabase Auth REST API
+const auth = {
+  async getSession() {
     try {
-      const raw=localStorage.getItem("fintrack_v2"); if(!raw)return 0;
-      const items=JSON.parse(raw); if(!items.length)return 0;
-      for(const item of items){try{await db.insertExpense(item);}catch{}}
-      localStorage.removeItem("fintrack_v2"); return items.length;
-    } catch{return 0;}
+      const raw = localStorage.getItem(`sb-${SUPABASE_URL.split("//")[1].split(".")[0]}-auth-token`);
+      if (!raw) return null;
+      const parsed = JSON.parse(raw);
+      if (!parsed?.access_token) return null;
+      // Check expiry
+      if (parsed.expires_at && Date.now() / 1000 > parsed.expires_at) return null;
+      return parsed;
+    } catch { return null; }
+  },
+  async signInWithGoogle() {
+    const redirectTo = encodeURIComponent(window.location.origin);
+    window.location.href = `${SUPABASE_URL}/auth/v1/authorize?provider=google&redirect_to=${redirectTo}`;
+  },
+  async signOut(token) {
+    await fetch(`${SUPABASE_URL}/auth/v1/logout`, {
+      method: "POST",
+      headers: { "apikey": SUPABASE_KEY, "Authorization": `Bearer ${token}` },
+    });
+    // Clear all supabase auth keys
+    Object.keys(localStorage).forEach(k => { if (k.includes("auth")) localStorage.removeItem(k); });
+  },
+  async getUser(token) {
+    const res = await fetch(`${SUPABASE_URL}/auth/v1/user`, {
+      headers: { "apikey": SUPABASE_KEY, "Authorization": `Bearer ${token}` },
+    });
+    if (!res.ok) return null;
+    return res.json();
+  },
+  // Parse token from URL hash after OAuth redirect
+  parseHashToken() {
+    const hash = window.location.hash;
+    if (!hash) return null;
+    const params = new URLSearchParams(hash.replace("#", ""));
+    const access_token = params.get("access_token");
+    const refresh_token = params.get("refresh_token");
+    const expires_at = params.get("expires_at");
+    if (!access_token) return null;
+    const session = { access_token, refresh_token, expires_at: Number(expires_at) };
+    // Store session like Supabase client would
+    const key = `sb-${SUPABASE_URL.split("//")[1].split(".")[0]}-auth-token`;
+    localStorage.setItem(key, JSON.stringify(session));
+    window.history.replaceState({}, "", window.location.pathname);
+    return session;
+  }
+};
+
+// DB layer — all operations are user-scoped via token
+const db = {
+  async fetchAll(token)       { const r=await sbFetch("expenses?select=*&order=created_at.desc",{token}); if(!r.ok)throw new Error(await r.text()); return r.json(); },
+  async fetchAccounts(token)  { const r=await sbFetch("accounts?select=*&order=name.asc",{token}); if(!r.ok)throw new Error(await r.text()); return r.json(); },
+  async fetchSubcats(token)   { const r=await sbFetch("subcategories?select=*&order=name.asc",{token}); if(!r.ok)throw new Error(await r.text()); return r.json(); },
+  async fetchProfile(token)   { const r=await sbFetch("profiles?select=*&limit=1",{token}); if(!r.ok)throw new Error(await r.text()); const rows=await r.json(); return rows[0]||null; },
+
+  async insertExpense(e, token, uid) {
+    const r=await sbFetch("expenses",{method:"POST",token,body:JSON.stringify({category:e.category,subcategory:e.subcategory,amount:e.amount,date:e.date,bank:e.bank,note:e.note||"",user_id:uid})});
+    if(!r.ok)throw new Error(await r.text()); return (await r.json())[0];
+  },
+  async deleteExpense(id, token) { const r=await sbFetch(`expenses?id=eq.${id}`,{method:"DELETE",prefer:"return=minimal",token}); if(!r.ok)throw new Error(await r.text()); },
+
+  async insertAccount(name, token, uid) {
+    const r=await sbFetch("accounts",{method:"POST",token,body:JSON.stringify({name,user_id:uid})});
+    if(!r.ok)throw new Error(await r.text()); return (await r.json())[0];
+  },
+  async deleteAccount(id, token) { const r=await sbFetch(`accounts?id=eq.${id}`,{method:"DELETE",prefer:"return=minimal",token}); if(!r.ok)throw new Error(await r.text()); },
+
+  async insertSubcat(category, name, token, uid) {
+    const r=await sbFetch("subcategories",{method:"POST",token,body:JSON.stringify({category,name,user_id:uid})});
+    if(!r.ok)throw new Error(await r.text()); return (await r.json())[0];
+  },
+  async deleteSubcat(id, token) { const r=await sbFetch(`subcategories?id=eq.${id}`,{method:"DELETE",prefer:"return=minimal",token}); if(!r.ok)throw new Error(await r.text()); },
+
+  // Seed defaults for a brand new user
+  async seedDefaults(token, uid) {
+    const defaultAccounts = ["UPI Wallet"];
+    const defaultSubcats = [
+      {category:"Needs", name:"Rent"}, {category:"Needs", name:"Groceries"},
+      {category:"Needs", name:"Travel"}, {category:"Needs", name:"Fuel"},
+      {category:"Wants", name:"Gifts"}, {category:"Wants", name:"Food"},
+      {category:"Wants", name:"Clothes"}, {category:"Wants", name:"Personal Items"},
+      {category:"Wants", name:"Trips"},
+      {category:"Investments", name:"Gold"}, {category:"Investments", name:"Silver"},
+      {category:"Investments", name:"Nifty 50"}, {category:"Investments", name:"MFs"},
+      {category:"Investments", name:"Crypto"}, {category:"Investments", name:"Tech Products"},
+    ];
+    for (const name of defaultAccounts) { try { await db.insertAccount(name, token, uid); } catch {} }
+    for (const s of defaultSubcats) { try { await db.insertSubcat(s.category, s.name, token, uid); } catch {} }
   }
 };
 
 // ── Constants ─────────────────────────────────────────────────────────────────
-const CAT_META = {
-  Needs:       { color:"#34d399", icon:"🏠" },
-  Wants:       { color:"#fb923c", icon:"✨" },
-  Investments: { color:"#60a5fa", icon:"📈" },
-};
+const CAT_META   = { Needs:{color:"#34d399",icon:"🏠"}, Wants:{color:"#fb923c",icon:"✨"}, Investments:{color:"#60a5fa",icon:"📈"} };
 const CAT_COLORS = { Needs:"#34d399", Wants:"#fb923c", Investments:"#60a5fa" };
 const MONTHS = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
 
@@ -51,16 +120,15 @@ const getMonthExp = (expenses,month,year) => expenses.filter(e=>{const d=new Dat
 // ── Excel Export ──────────────────────────────────────────────────────────────
 async function exportToExcel(expenses) {
   if(!window.XLSX){await new Promise((res,rej)=>{const s=document.createElement("script");s.src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js";s.onload=res;s.onerror=rej;document.head.appendChild(s);});}
-  const XLSX=window.XLSX, wb=XLSX.utils.book_new(), HDR=["Date","Category","Subcategory","Amount (₹)","Bank","Note"], toRow=e=>[e.date,e.category,e.subcategory,e.amount,e.bank,e.note||""], CW=[{wch:12},{wch:14},{wch:16},{wch:14},{wch:16},{wch:26}];
-  const wsAll=XLSX.utils.aoa_to_sheet([HDR,...[...expenses].sort((a,b)=>new Date(a.date)-new Date(b.date)).map(toRow)]); wsAll["!cols"]=CW;
+  const XLSX=window.XLSX,wb=XLSX.utils.book_new(),HDR=["Date","Category","Subcategory","Amount (₹)","Bank","Note"],toRow=e=>[e.date,e.category,e.subcategory,e.amount,e.bank,e.note||""],CW=[{wch:12},{wch:14},{wch:16},{wch:14},{wch:16},{wch:26}];
+  const wsAll=XLSX.utils.aoa_to_sheet([HDR,...[...expenses].sort((a,b)=>new Date(a.date)-new Date(b.date)).map(toRow)]);wsAll["!cols"]=CW;
   XLSX.utils.book_append_sheet(wb,wsAll,"All Expenses");
-  const grouped={};
-  expenses.forEach(e=>{const d=new Date(e.date);const k=`${MONTHS[d.getMonth()]} ${d.getFullYear()}`;(grouped[k]=grouped[k]||[]).push(e);});
+  const grouped={};expenses.forEach(e=>{const d=new Date(e.date);const k=`${MONTHS[d.getMonth()]} ${d.getFullYear()}`;(grouped[k]=grouped[k]||[]).push(e);});
   Object.entries(grouped).sort().forEach(([label,rows])=>{
     const s=[...rows].sort((a,b)=>new Date(a.date)-new Date(b.date));
-    const n=s.filter(e=>e.category==="Needs").reduce((a,b)=>a+b.amount,0), w=s.filter(e=>e.category==="Wants").reduce((a,b)=>a+b.amount,0), i=s.filter(e=>e.category==="Investments").reduce((a,b)=>a+b.amount,0);
+    const n=s.filter(e=>e.category==="Needs").reduce((a,b)=>a+b.amount,0),w=s.filter(e=>e.category==="Wants").reduce((a,b)=>a+b.amount,0),i=s.filter(e=>e.category==="Investments").reduce((a,b)=>a+b.amount,0);
     const ws=XLSX.utils.aoa_to_sheet([HDR,...s.map(toRow),[],["","","🏠 Needs",n,"",""],["","","✨ Wants",w,"",""],["","","📈 Investments",i,"",""],["","","TOTAL",n+w+i,"",""]]);
-    ws["!cols"]=CW; XLSX.utils.book_append_sheet(wb,ws,label);
+    ws["!cols"]=CW;XLSX.utils.book_append_sheet(wb,ws,label);
   });
   XLSX.writeFile(wb,`FinanceTracker_${new Date().toISOString().split("T")[0]}.xlsx`);
 }
@@ -80,6 +148,119 @@ const GS = () => <style>{`
   .spin{animation:spin 1s linear infinite;display:inline-block;}
   @keyframes spin{to{transform:rotate(360deg)}}
 `}</style>;
+
+// ════════════════════════════════════════════════════════════════════════════════
+// LOGIN SCREEN
+// ════════════════════════════════════════════════════════════════════════════════
+function LoginScreen({ onLogin }) {
+  const [loading, setLoading] = useState(false);
+  const handleLogin = () => { setLoading(true); onLogin(); };
+  return (
+    <div style={{minHeight:"100vh",background:"var(--bg)",display:"flex",alignItems:"center",justifyContent:"center",padding:"24px"}}>
+      <style>{`
+        .login-card{background:linear-gradient(135deg,#1b1e2e,#12141f);border:1px solid rgba(129,140,248,0.18);border-radius:28px;padding:40px 32px;max-width:340px;width:100%;text-align:center;position:relative;overflow:hidden;}
+        .login-card::before{content:'';position:absolute;top:-60px;right:-60px;width:200px;height:200px;background:radial-gradient(circle,rgba(129,140,248,0.12),transparent 70%);border-radius:50%;}
+        .login-card::after{content:'';position:absolute;bottom:-60px;left:-60px;width:200px;height:200px;background:radial-gradient(circle,rgba(96,165,250,0.08),transparent 70%);border-radius:50%;}
+        .login-ico{font-size:52px;margin-bottom:16px;display:block;}
+        .login-title{font-size:28px;font-weight:800;letter-spacing:-0.02em;margin-bottom:6px;}
+        .login-sub{font-size:14px;color:var(--muted);margin-bottom:36px;line-height:1.5;}
+        .google-btn{width:100%;padding:14px 20px;background:white;border:none;border-radius:14px;display:flex;align-items:center;justify-content:center;gap:10px;font-family:'Outfit',sans-serif;font-size:15px;font-weight:700;color:#1a1a2e;transition:all .2s;position:relative;z-index:1;}
+        .google-btn:hover{transform:translateY(-2px);box-shadow:0 8px 24px rgba(0,0,0,.4);}
+        .google-btn:disabled{opacity:.7;}
+        .google-ico{width:20px;height:20px;}
+        .login-footer{font-size:11px;color:var(--muted);margin-top:20px;line-height:1.6;position:relative;z-index:1;}
+      `}</style>
+      <div className="login-card fade">
+        <span className="login-ico">💰</span>
+        <div className="login-title">FinTrack</div>
+        <div className="login-sub">Your personal finance tracker for Needs, Wants & Investments</div>
+        <button className="google-btn" onClick={handleLogin} disabled={loading}>
+          {loading ? <span className="spin" style={{color:"#818cf8"}}>⟳</span> : (
+            <svg className="google-ico" viewBox="0 0 24 24">
+              <path fill="#4285F4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"/>
+              <path fill="#34A853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"/>
+              <path fill="#FBBC05" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l2.85-2.22.81-.62z"/>
+              <path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z"/>
+            </svg>
+          )}
+          {loading ? "Redirecting…" : "Continue with Google"}
+        </button>
+        <div className="login-footer">Your data is private and securely stored.<br/>Only you can see your expenses.</div>
+      </div>
+    </div>
+  );
+}
+
+// ════════════════════════════════════════════════════════════════════════════════
+// PROFILE TAB
+// ════════════════════════════════════════════════════════════════════════════════
+function Profile({ user, profile, token, onSignOut }) {
+  const [signingOut, setSigningOut] = useState(false);
+  const handleSignOut = async () => { setSigningOut(true); await onSignOut(); };
+  const initials = (profile?.full_name || user?.email || "U").split(" ").map(w=>w[0]).join("").toUpperCase().slice(0,2);
+
+  return <div style={{padding:"22px 16px 0"}} className="fade">
+    <style>{`
+      .prof-header{text-align:center;padding:32px 0 28px;}
+      .prof-avatar{width:80px;height:80px;border-radius:50%;margin:0 auto 14px;display:flex;align-items:center;justify-content:center;font-size:28px;font-weight:800;background:linear-gradient(135deg,#818cf8,#60a5fa);overflow:hidden;}
+      .prof-avatar img{width:100%;height:100%;object-fit:cover;}
+      .prof-name{font-size:22px;font-weight:800;letter-spacing:-0.02em;}
+      .prof-email{font-size:13px;color:var(--muted);margin-top:4px;font-family:'JetBrains Mono',monospace;}
+      .prof-since{font-size:11px;color:var(--muted);margin-top:6px;}
+      .prof-card{background:var(--surface);border:1px solid var(--border);border-radius:16px;padding:16px;margin-bottom:12px;}
+      .prof-row{display:flex;align-items:center;gap:12px;padding:10px 0;border-bottom:1px solid var(--border);}
+      .prof-row:last-child{border-bottom:none;padding-bottom:0;}
+      .prof-row-ico{width:32px;height:32px;border-radius:10px;background:var(--surface2);display:flex;align-items:center;justify-content:center;font-size:15px;flex-shrink:0;}
+      .prof-row-info{flex:1;}
+      .prof-row-label{font-size:11px;color:var(--muted);font-family:'JetBrains Mono',monospace;text-transform:uppercase;letter-spacing:.06em;}
+      .prof-row-val{font-size:14px;font-weight:600;margin-top:1px;}
+      .signout-btn{width:100%;padding:15px;background:rgba(248,113,113,0.1);border:1px solid rgba(248,113,113,0.25);border-radius:16px;color:#f87171;font-family:'Outfit',sans-serif;font-size:15px;font-weight:700;transition:all .2s;margin-top:8px;display:flex;align-items:center;justify-content:center;gap:8px;}
+      .signout-btn:hover{background:rgba(248,113,113,0.18);}
+      .signout-btn:disabled{opacity:.6;}
+      .prof-sec{font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.09em;font-family:'JetBrains Mono',monospace;margin-bottom:10px;}
+    `}</style>
+
+    <div className="prof-header">
+      <div className="prof-avatar">
+        {profile?.avatar_url
+          ? <img src={profile.avatar_url} alt="avatar" referrerPolicy="no-referrer"/>
+          : initials}
+      </div>
+      <div className="prof-name">{profile?.full_name || "User"}</div>
+      <div className="prof-email">{user?.email}</div>
+      <div className="prof-since">Member since {user?.created_at ? new Date(user.created_at).toLocaleDateString("en-IN",{month:"long",year:"numeric"}) : "—"}</div>
+    </div>
+
+    <div className="prof-sec">Account Info</div>
+    <div className="prof-card">
+      <div className="prof-row">
+        <div className="prof-row-ico">👤</div>
+        <div className="prof-row-info">
+          <div className="prof-row-label">Name</div>
+          <div className="prof-row-val">{profile?.full_name || "—"}</div>
+        </div>
+      </div>
+      <div className="prof-row">
+        <div className="prof-row-ico">✉️</div>
+        <div className="prof-row-info">
+          <div className="prof-row-label">Email</div>
+          <div className="prof-row-val">{user?.email || "—"}</div>
+        </div>
+      </div>
+      <div className="prof-row">
+        <div className="prof-row-ico">🔐</div>
+        <div className="prof-row-info">
+          <div className="prof-row-label">Login Method</div>
+          <div className="prof-row-val">Google</div>
+        </div>
+      </div>
+    </div>
+
+    <button className="signout-btn" onClick={handleSignOut} disabled={signingOut}>
+      {signingOut ? <><span className="spin">⟳</span> Signing out…</> : "← Sign Out"}
+    </button>
+  </div>;
+}
 
 // ════════════════════════════════════════════════════════════════════════════════
 // DASHBOARD
@@ -214,13 +395,8 @@ function AddExpense({ onAdd, onCancel, saving, accounts, subcatMap }) {
   const [note,setNote]=useState("");
   const [error,setError]=useState("");
 
-  // Set default sub when category changes
-  useEffect(()=>{
-    const subs=subcatMap[category]||[];
-    setSub(subs[0]?.name||"");
-  },[category,subcatMap]);
-
-  useEffect(()=>{ if(accounts.length>0&&!bank) setBank(accounts[0].name); },[accounts]);
+  useEffect(()=>{const subs=subcatMap[category]||[];setSub(subs[0]?.name||"");},[category,subcatMap]);
+  useEffect(()=>{if(accounts.length>0&&!bank)setBank(accounts[0].name);},[accounts]);
 
   const color=CAT_COLORS[category];
   const subs=subcatMap[category]||[];
@@ -244,7 +420,6 @@ function AddExpense({ onAdd, onCancel, saving, accounts, subcatMap }) {
       .ctab{padding:12px 8px;border-radius:14px;border:2px solid var(--border);background:var(--surface);color:var(--muted);font-family:'Outfit',sans-serif;font-size:12px;font-weight:700;text-align:center;transition:all .2s;}
       .ctab .ti{font-size:20px;display:block;margin-bottom:4px;}
       .ctab.act{color:var(--text);}
-      /* KEY FIX: flex-wrap so chips go to next line */
       .ss{display:flex;gap:7px;flex-wrap:wrap;padding-bottom:2px;}
       .sch{padding:6px 13px;border-radius:99px;border:1px solid var(--border);background:var(--surface);color:var(--muted);font-family:'Outfit',sans-serif;font-size:13px;font-weight:600;white-space:nowrap;transition:all .15s;}
       .aiw{background:var(--surface);border:2px solid var(--border);border-radius:16px;display:flex;align-items:center;padding:0 12px;transition:border-color .2s;}
@@ -281,14 +456,12 @@ function AddExpense({ onAdd, onCancel, saving, accounts, subcatMap }) {
     <div className="fg">
       <div className="flbl">Subcategory</div>
       {subs.length===0
-        ? <div className="no-subs">No subcategories yet — add them in Personalise tab.</div>
-        : <div className="ss">
-            {subs.map(s=>(
-              <button key={s.id} className={`sch${subcategory===s.name?" act":""}`}
-                style={subcategory===s.name?{borderColor:color,background:`${color}22`,color}:{}}
-                onClick={()=>setSub(s.name)}>{s.name}</button>
-            ))}
-          </div>
+        ? <div className="no-subs">No subcategories yet — add in Personalise tab.</div>
+        : <div className="ss">{subs.map(s=>(
+            <button key={s.id} className={`sch${subcategory===s.name?" act":""}`}
+              style={subcategory===s.name?{borderColor:color,background:`${color}22`,color}:{}}
+              onClick={()=>setSub(s.name)}>{s.name}</button>
+          ))}</div>
       }
     </div>
     <div className="fg">
@@ -308,7 +481,7 @@ function AddExpense({ onAdd, onCancel, saving, accounts, subcatMap }) {
         <div>
           <div className="flbl">Account</div>
           <select className="sf" value={bank} onChange={e=>setBank(e.target.value)}>
-            {accounts.length===0 ? <option>No accounts</option> : accounts.map(a=><option key={a.id}>{a.name}</option>)}
+            {accounts.length===0?<option>No accounts</option>:accounts.map(a=><option key={a.id}>{a.name}</option>)}
           </select>
         </div>
       </div>
@@ -333,6 +506,7 @@ function MonthView({ expenses, selMonth, setSelMonth, onDelete, onBack }) {
   const totals=useMemo(()=>{const t={Needs:0,Wants:0,Investments:0,total:0};monthExp.forEach(e=>{t[e.category]=(t[e.category]||0)+e.amount;t.total+=e.amount;});return t;},[monthExp]);
   const prevM=()=>{let m=month-1,y=year;if(m<0){m=11;y--;}if(y<2026)return;setSelMonth({month:m,year:y});};
   const nextM=()=>{const now=new Date();let m=month+1,y=year;if(m>11){m=0;y++;}if(y>now.getFullYear()||(y===now.getFullYear()&&m>now.getMonth()))return;setSelMonth({month:m,year:y});};
+
   return <div style={{padding:"22px 16px 0"}} className="fade">
     <style>{`
       .mvh{display:flex;align-items:center;gap:10px;margin-bottom:18px;}
@@ -411,33 +585,29 @@ function MonthView({ expenses, selMonth, setSelMonth, onDelete, onBack }) {
 }
 
 // ════════════════════════════════════════════════════════════════════════════════
-// PERSONALISE TAB
+// PERSONALISE
 // ════════════════════════════════════════════════════════════════════════════════
 function Personalise({ accounts, subcatMap, onAddAccount, onDeleteAccount, onAddSubcat, onDeleteSubcat }) {
-  const [newAccount, setNewAccount] = useState("");
-  const [activeSubCat, setActiveSubCat] = useState("Needs");
-  const [newSubcat, setNewSubcat]   = useState("");
-  const [accErr, setAccErr]   = useState("");
-  const [subErr, setSubErr]   = useState("");
+  const [newAccount,setNewAccount]=useState("");
+  const [activeSubCat,setActiveSubCat]=useState("Needs");
+  const [newSubcat,setNewSubcat]=useState("");
+  const [accErr,setAccErr]=useState("");
+  const [subErr,setSubErr]=useState("");
 
-  const submitAccount = () => {
-    const v = newAccount.trim();
-    if (!v) { setAccErr("Enter account name"); return; }
-    if (accounts.find(a=>a.name.toLowerCase()===v.toLowerCase())) { setAccErr("Already exists"); return; }
-    setAccErr(""); setNewAccount("");
-    onAddAccount(v);
+  const submitAccount=()=>{
+    const v=newAccount.trim();
+    if(!v){setAccErr("Enter account name");return;}
+    if(accounts.find(a=>a.name.toLowerCase()===v.toLowerCase())){setAccErr("Already exists");return;}
+    setAccErr("");setNewAccount("");onAddAccount(v);
   };
-
-  const submitSubcat = () => {
-    const v = newSubcat.trim();
-    if (!v) { setSubErr("Enter subcategory name"); return; }
-    const existing = subcatMap[activeSubCat]||[];
-    if (existing.find(s=>s.name.toLowerCase()===v.toLowerCase())) { setSubErr("Already exists"); return; }
-    setSubErr(""); setNewSubcat("");
-    onAddSubcat(activeSubCat, v);
+  const submitSubcat=()=>{
+    const v=newSubcat.trim();
+    if(!v){setSubErr("Enter subcategory name");return;}
+    const existing=subcatMap[activeSubCat]||[];
+    if(existing.find(s=>s.name.toLowerCase()===v.toLowerCase())){setSubErr("Already exists");return;}
+    setSubErr("");setNewSubcat("");onAddSubcat(activeSubCat,v);
   };
-
-  const color = CAT_COLORS[activeSubCat];
+  const color=CAT_COLORS[activeSubCat];
 
   return <div style={{padding:"22px 16px 0"}} className="fade">
     <style>{`
@@ -461,20 +631,14 @@ function Personalise({ accounts, subcatMap, onAddAccount, onDeleteAccount, onAdd
       .ct2.act{color:var(--text);}
       .empty-tags{font-size:13px;color:var(--muted);padding:4px 0 10px;}
     `}</style>
-
     <div className="ph">Personalise</div>
     <div className="ps">Manage your accounts and expense categories</div>
-
-    {/* ACCOUNTS */}
     <div className="psec">Bank Accounts</div>
     <div className="pcard">
       <div className="tag-wrap">
-        {accounts.length===0 && <div className="empty-tags">No accounts yet</div>}
+        {accounts.length===0&&<div className="empty-tags">No accounts yet</div>}
         {accounts.map(a=>(
-          <div className="ptag" key={a.id}>
-            🏦 {a.name}
-            <button className="ptag-del" onClick={()=>onDeleteAccount(a.id)}>✕</button>
-          </div>
+          <div className="ptag" key={a.id}>🏦 {a.name}<button className="ptag-del" onClick={()=>onDeleteAccount(a.id)}>✕</button></div>
         ))}
       </div>
       <div className="add-row">
@@ -483,8 +647,6 @@ function Personalise({ accounts, subcatMap, onAddAccount, onDeleteAccount, onAdd
       </div>
       {accErr&&<div className="perr">⚠ {accErr}</div>}
     </div>
-
-    {/* SUBCATEGORIES */}
     <div className="psec">Subcategories</div>
     <div className="pcard">
       <div className="cat-tabs2">
@@ -497,7 +659,7 @@ function Personalise({ accounts, subcatMap, onAddAccount, onDeleteAccount, onAdd
         ))}
       </div>
       <div className="tag-wrap">
-        {(subcatMap[activeSubCat]||[]).length===0 && <div className="empty-tags">No subcategories yet</div>}
+        {(subcatMap[activeSubCat]||[]).length===0&&<div className="empty-tags">No subcategories yet</div>}
         {(subcatMap[activeSubCat]||[]).map(s=>(
           <div className="ptag" key={s.id} style={{borderColor:`${color}40`}}>
             <span style={{color}}>{s.name}</span>
@@ -506,8 +668,10 @@ function Personalise({ accounts, subcatMap, onAddAccount, onDeleteAccount, onAdd
         ))}
       </div>
       <div className="add-row">
-        <input className="add-input" placeholder={`Add to ${activeSubCat}...`} value={newSubcat} onChange={e=>{setNewSubcat(e.target.value);setSubErr("");}} onKeyDown={e=>e.key==="Enter"&&submitSubcat()}
-          style={{borderColor: newSubcat ? `${color}60` : ""}}/>
+        <input className="add-input" placeholder={`Add to ${activeSubCat}...`} value={newSubcat}
+          onChange={e=>{setNewSubcat(e.target.value);setSubErr("");}}
+          onKeyDown={e=>e.key==="Enter"&&submitSubcat()}
+          style={{borderColor:newSubcat?`${color}60`:""}}/>
         <button className="add-btn" style={{background:color}} onClick={submitSubcat}>+ Add</button>
       </div>
       {subErr&&<div className="perr">⚠ {subErr}</div>}
@@ -520,10 +684,14 @@ function Personalise({ accounts, subcatMap, onAddAccount, onDeleteAccount, onAdd
 // ════════════════════════════════════════════════════════════════════════════════
 export default function App() {
   const [tab,setTab]           = useState("dashboard");
+  const [session,setSession]   = useState(null);
+  const [user,setUser]         = useState(null);
+  const [profile,setProfile]   = useState(null);
+  const [authLoading,setAuthLoading] = useState(true);
   const [expenses,setExpenses] = useState([]);
   const [accounts,setAccounts] = useState([]);
   const [subcats,setSubcats]   = useState([]);
-  const [loading,setLoading]   = useState(true);
+  const [dataLoading,setDataLoading] = useState(false);
   const [saving,setSaving]     = useState(false);
   const [exporting,setExporting] = useState(false);
   const [selMonth,setSelMonth] = useState(()=>{const n=new Date();return{month:n.getMonth(),year:n.getFullYear()};});
@@ -532,69 +700,105 @@ export default function App() {
 
   const showToast = useCallback((msg,isErr=false)=>{setToast({msg,isErr});setTimeout(()=>setToast(null),3000);},[]);
 
-  // subcatMap: { Needs: [{id,name}, ...], Wants: [...], Investments: [...] }
   const subcatMap = useMemo(()=>{
     const m={Needs:[],Wants:[],Investments:[]};
     subcats.forEach(s=>{if(m[s.category])m[s.category].push(s);});
     return m;
   },[subcats]);
 
+  // On mount: check for OAuth redirect hash first, then existing session
   useEffect(()=>{
     (async()=>{
       try {
-        setLoading(true);
-        const migrated = await db.migrateFromLocal();
-        if(migrated>0) showToast(`✓ Migrated ${migrated} entries to Supabase`);
-        const [exps, accs, subs] = await Promise.all([db.fetchAll(), db.fetchAccounts(), db.fetchSubcats()]);
-        setExpenses(exps); setAccounts(accs); setSubcats(subs);
+        setAuthLoading(true);
+        // Check if returning from Google OAuth
+        let sess = auth.parseHashToken() || await auth.getSession();
+        if (!sess) { setAuthLoading(false); return; }
+        const u = await auth.getUser(sess.access_token);
+        if (!u) { setAuthLoading(false); return; }
+        setSession(sess);
+        setUser(u);
+        await loadUserData(sess.access_token, u.id);
       } catch(e) {
-        setDbError("Cannot connect to Supabase. Check your network.");
-        showToast("Connection error",true);
-      } finally { setLoading(false); }
+        console.error(e);
+      } finally {
+        setAuthLoading(false);
+      }
     })();
   },[]);
 
+  const loadUserData = async (token, uid) => {
+    try {
+      setDataLoading(true);
+      const [exps, accs, subs, prof] = await Promise.all([
+        db.fetchAll(token), db.fetchAccounts(token),
+        db.fetchSubcats(token), db.fetchProfile(token)
+      ]);
+      // New user — seed defaults
+      if (accs.length === 0 && subs.length === 0) {
+        await db.seedDefaults(token, uid);
+        const [newAccs, newSubs] = await Promise.all([db.fetchAccounts(token), db.fetchSubcats(token)]);
+        setAccounts(newAccs); setSubcats(newSubs);
+      } else {
+        setAccounts(accs); setSubcats(subs);
+      }
+      setExpenses(exps); setProfile(prof);
+    } catch(e) {
+      setDbError("Could not load your data. Try refreshing.");
+      showToast("Data load error", true);
+    } finally { setDataLoading(false); }
+  };
+
+  const handleSignIn  = () => auth.signInWithGoogle();
+  const handleSignOut = async () => {
+    if (session) await auth.signOut(session.access_token);
+    setSession(null); setUser(null); setProfile(null);
+    setExpenses([]); setAccounts([]); setSubcats([]);
+    setTab("dashboard");
+    showToast("Signed out");
+  };
+
   const addExpense = async (exp) => {
-    try { setSaving(true); const saved=await db.insertExpense(exp); setExpenses(p=>[saved,...p]); showToast("✓ Saved to Supabase"); setTab("dashboard"); }
-    catch { showToast("Failed to save",true); }
-    finally { setSaving(false); }
+    try { setSaving(true); const saved=await db.insertExpense(exp,session.access_token,user.id); setExpenses(p=>[saved,...p]); showToast("✓ Saved"); setTab("dashboard"); }
+    catch { showToast("Failed to save",true); } finally { setSaving(false); }
   };
   const deleteExpense = async (id) => {
-    try { await db.deleteExpense(id); setExpenses(p=>p.filter(e=>e.id!==id)); showToast("Deleted"); }
+    try { await db.deleteExpense(id,session.access_token); setExpenses(p=>p.filter(e=>e.id!==id)); showToast("Deleted"); }
     catch { showToast("Delete failed",true); }
   };
   const addAccount = async (name) => {
-    try { const a=await db.insertAccount(name); setAccounts(p=>[...p,a].sort((a,b)=>a.name.localeCompare(b.name))); showToast(`✓ Added ${name}`); }
+    try { const a=await db.insertAccount(name,session.access_token,user.id); setAccounts(p=>[...p,a].sort((a,b)=>a.name.localeCompare(b.name))); showToast(`✓ Added ${name}`); }
     catch { showToast("Failed to add account",true); }
   };
   const deleteAccount = async (id) => {
-    try { await db.deleteAccount(id); setAccounts(p=>p.filter(a=>a.id!==id)); showToast("Account removed"); }
+    try { await db.deleteAccount(id,session.access_token); setAccounts(p=>p.filter(a=>a.id!==id)); showToast("Account removed"); }
     catch { showToast("Failed to remove",true); }
   };
   const addSubcat = async (category,name) => {
-    try { const s=await db.insertSubcat(category,name); setSubcats(p=>[...p,s]); showToast(`✓ Added "${name}"`); }
-    catch { showToast("Failed to add subcategory",true); }
+    try { const s=await db.insertSubcat(category,name,session.access_token,user.id); setSubcats(p=>[...p,s]); showToast(`✓ Added "${name}"`); }
+    catch { showToast("Failed to add",true); }
   };
   const deleteSubcat = async (id) => {
-    try { await db.deleteSubcat(id); setSubcats(p=>p.filter(s=>s.id!==id)); showToast("Subcategory removed"); }
+    try { await db.deleteSubcat(id,session.access_token); setSubcats(p=>p.filter(s=>s.id!==id)); showToast("Removed"); }
     catch { showToast("Failed to remove",true); }
   };
   const handleExport = async () => {
     if(expenses.length===0){showToast("No data to export");return;}
     try { setExporting(true); await exportToExcel(expenses); showToast("✓ Excel downloaded!"); }
-    catch { showToast("Export failed",true); }
-    finally { setExporting(false); }
+    catch { showToast("Export failed",true); } finally { setExporting(false); }
   };
 
+  // ── Render ──────────────────────────────────────────────────────────────────
   return <>
     <GS/>
     <style>{`
       .root{min-height:100vh;background:var(--bg);max-width:480px;margin:0 auto;position:relative;display:flex;flex-direction:column;}
-      .content{flex:1;padding-bottom:76px;}
-      .nav{position:fixed;bottom:0;left:50%;transform:translateX(-50%);width:100%;max-width:480px;background:rgba(18,20,26,0.96);backdrop-filter:blur(20px);border-top:1px solid var(--border);display:flex;z-index:100;padding:7px 0 11px;}
-      .nb{flex:1;background:none;border:none;display:flex;flex-direction:column;align-items:center;gap:3px;padding:8px;color:var(--muted);font-family:'Outfit',sans-serif;font-size:10px;font-weight:600;transition:color .2s;letter-spacing:.02em;}
-      .nb.act{color:var(--accent);} .nb .ni{font-size:19px;}
-      .nb.addnb .ni{background:linear-gradient(135deg,#818cf8,#60a5fa);border-radius:13px;width:42px;height:42px;display:flex;align-items:center;justify-content:center;font-size:20px;box-shadow:0 4px 18px rgba(129,140,248,.4);margin-bottom:1px;}
+      .content{flex:1;padding-bottom:80px;}
+      .nav{position:fixed;bottom:0;left:50%;transform:translateX(-50%);width:100%;max-width:480px;background:rgba(18,20,26,0.96);backdrop-filter:blur(20px);border-top:1px solid var(--border);display:flex;z-index:100;padding:7px 0 12px;}
+      .nb{flex:1;background:none;border:none;display:flex;flex-direction:column;align-items:center;gap:3px;padding:6px 4px;color:var(--muted);font-family:'Outfit',sans-serif;font-size:9px;font-weight:600;transition:color .2s;letter-spacing:.02em;}
+      .nb.act{color:var(--accent);}
+      .nb .ni{font-size:18px;line-height:1.2;}
+      .nb.addnb .ni{background:linear-gradient(135deg,#818cf8,#60a5fa);border-radius:13px;width:40px;height:40px;display:flex;align-items:center;justify-content:center;font-size:20px;box-shadow:0 4px 18px rgba(129,140,248,.4);margin-bottom:1px;}
       .nb.addnb{color:var(--text);}
       .tst{position:fixed;top:18px;left:50%;transform:translateX(-50%);border-radius:99px;padding:9px 18px;font-size:13px;font-weight:500;z-index:999;animation:fadeUp .3s ease;white-space:nowrap;}
       .ls{position:fixed;inset:0;background:var(--bg);display:flex;flex-direction:column;align-items:center;justify-content:center;gap:14px;z-index:500;}
@@ -606,30 +810,47 @@ export default function App() {
       .es-i{font-size:36px;margin-bottom:12px;} .es-t{font-size:16px;font-weight:700;color:#f87171;margin-bottom:6px;}
     `}</style>
 
-    {loading&&<div className="ls"><div className="ls-ico">💰</div><div className="ls-txt">Loading your data…</div><div className="ls-bar"><div className="ls-fill"/></div></div>}
+    {/* Auth loading */}
+    {authLoading && <div className="ls"><div className="ls-ico">💰</div><div className="ls-txt">Loading…</div><div className="ls-bar"><div className="ls-fill"/></div></div>}
 
-    <div className="root">
-      <div className="content">
-        {dbError?(
-          <div className="es"><div className="es-i">⚠️</div><div className="es-t">Connection Failed</div><div>{dbError}</div></div>
-        ):(
-          <>
-            {tab==="dashboard"  && <Dashboard expenses={expenses} selMonth={selMonth} setSelMonth={setSelMonth} onGoEntries={()=>setTab("month")} onExport={handleExport} exporting={exporting}/>}
-            {tab==="add"        && <AddExpense onAdd={addExpense} onCancel={()=>setTab("dashboard")} saving={saving} accounts={accounts} subcatMap={subcatMap}/>}
-            {tab==="month"      && <MonthView  expenses={expenses} selMonth={selMonth} setSelMonth={setSelMonth} onDelete={deleteExpense} onBack={()=>setTab("dashboard")}/>}
-            {tab==="personalise"&& <Personalise accounts={accounts} subcatMap={subcatMap} onAddAccount={addAccount} onDeleteAccount={deleteAccount} onAddSubcat={addSubcat} onDeleteSubcat={deleteSubcat}/>}
-          </>
-        )}
-      </div>
-      {!loading&&!dbError&&(
+    {/* Not logged in */}
+    {!authLoading && !session && <LoginScreen onLogin={handleSignIn}/>}
+
+    {/* Logged in */}
+    {!authLoading && session && (
+      <div className="root">
+        <div className="content">
+          {dataLoading ? (
+            <div className="ls" style={{position:"relative",height:"80vh"}}>
+              <div className="ls-ico">💰</div><div className="ls-txt">Loading your data…</div>
+              <div className="ls-bar"><div className="ls-fill"/></div>
+            </div>
+          ) : dbError ? (
+            <div className="es"><div className="es-i">⚠️</div><div className="es-t">Error</div><div>{dbError}</div></div>
+          ) : (
+            <>
+              {tab==="profile"    && <Profile user={user} profile={profile} token={session.access_token} onSignOut={handleSignOut}/>}
+              {tab==="dashboard"  && <Dashboard expenses={expenses} selMonth={selMonth} setSelMonth={setSelMonth} onGoEntries={()=>setTab("entries")} onExport={handleExport} exporting={exporting}/>}
+              {tab==="add"        && <AddExpense onAdd={addExpense} onCancel={()=>setTab("dashboard")} saving={saving} accounts={accounts} subcatMap={subcatMap}/>}
+              {tab==="entries"    && <MonthView expenses={expenses} selMonth={selMonth} setSelMonth={setSelMonth} onDelete={deleteExpense} onBack={()=>setTab("dashboard")}/>}
+              {tab==="personalise"&& <Personalise accounts={accounts} subcatMap={subcatMap} onAddAccount={addAccount} onDeleteAccount={deleteAccount} onAddSubcat={addSubcat} onDeleteSubcat={deleteSubcat}/>}
+            </>
+          )}
+        </div>
+
+        {/* 5-tab nav: Profile | Entries | [+] | Personalise | Overview */}
         <nav className="nav">
-          <button className={`nb${tab==="dashboard"?" act":""}`}   onClick={()=>setTab("dashboard")}><span className="ni">◎</span>Overview</button>
+          <button className={`nb${tab==="profile"?" act":""}`}     onClick={()=>setTab("profile")}>
+            <span className="ni">{profile?.avatar_url ? <img src={profile.avatar_url} style={{width:22,height:22,borderRadius:"50%",objectFit:"cover"}} referrerPolicy="no-referrer"/> : "👤"}</span>Profile
+          </button>
+          <button className={`nb${tab==="entries"?" act":""}`}     onClick={()=>setTab("entries")}><span className="ni">☰</span>Entries</button>
           <button className="nb addnb"                              onClick={()=>setTab("add")}><span className="ni">＋</span>Add</button>
-          <button className={`nb${tab==="month"?" act":""}`}       onClick={()=>setTab("month")}><span className="ni">☰</span>Entries</button>
           <button className={`nb${tab==="personalise"?" act":""}`} onClick={()=>setTab("personalise")}><span className="ni">⚙</span>Personalise</button>
+          <button className={`nb${tab==="dashboard"?" act":""}`}   onClick={()=>setTab("dashboard")}><span className="ni">◎</span>Overview</button>
         </nav>
-      )}
-      {toast&&<div className="tst" style={{background:toast.isErr?"rgba(248,113,113,0.15)":"var(--surface2)",border:`1px solid ${toast.isErr?"rgba(248,113,113,0.3)":"var(--border)"}`,color:toast.isErr?"#f87171":"var(--text)"}}>{toast.msg}</div>}
-    </div>
+
+        {toast&&<div className="tst" style={{background:toast.isErr?"rgba(248,113,113,0.15)":"var(--surface2)",border:`1px solid ${toast.isErr?"rgba(248,113,113,0.3)":"var(--border)"}`,color:toast.isErr?"#f87171":"var(--text)"}}>{toast.msg}</div>}
+      </div>
+    )}
   </>;
 }
